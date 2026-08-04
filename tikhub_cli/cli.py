@@ -759,7 +759,6 @@ def reverse(
 
         # Rich 格式化输出
         from rich.panel import Panel
-        from rich.markdown import Markdown
 
         console.print()
         console.print(Panel.fit(
@@ -767,45 +766,43 @@ def reverse(
             border_style="cyan",
         ))
 
-        # 中文 prompt
+        # 画面类型
+        if result.get("style_type"):
+            console.print(f"[bold yellow]🎨 {result['style_type']}[/]")
+
+        # 正向提示词 (English)
         if result.get("prompt"):
             console.print(Panel(
                 result["prompt"],
-                title="[bold]中文提示词[/]",
+                title="[bold green]正向提示词 (Positive Prompt)[/]",
                 border_style="green",
             ))
 
-        # 英文 prompt
-        if result.get("prompt_en"):
+        # 反向提示词
+        if result.get("negative_prompt"):
             console.print(Panel(
-                result["prompt_en"],
-                title="[bold]English Prompt[/]",
-                border_style="blue",
+                result["negative_prompt"],
+                title="[bold red]反向提示词 (Negative Prompt)[/]",
+                border_style="red",
             ))
 
-        # 结构化字段
-        fields = []
-        if result.get("subject"):
-            fields.append(("主体", result["subject"]))
-        if result.get("scene"):
-            fields.append(("场景", result["scene"]))
-        if result.get("mood"):
-            fields.append(("氛围", result["mood"]))
-        if result.get("camera"):
-            fields.append(("镜头", result["camera"]))
-        if result.get("aspect_ratio"):
-            fields.append(("比例", result["aspect_ratio"]))
-        if result.get("colors"):
-            fields.append(("色彩", ", ".join(result["colors"])))
-        if result.get("style_tags"):
-            fields.append(("风格标签", ", ".join(result["style_tags"])))
+        # 参数建议
+        if result.get("params"):
+            params = result["params"]
+            if params:
+                table = Table(show_header=False, box=None, title="参数建议")
+                table.add_column(style="dim", width=12)
+                table.add_column()
+                for k, v in params.items():
+                    table.add_row(k, v)
+                console.print(table)
 
-        if fields:
-            table = Table(show_header=False, box=None)
-            table.add_column(style="dim", width=10)
-            table.add_column()
-            for k, v in fields:
-                table.add_row(k, v)
-            console.print(table)
+        # 中文释义
+        if result.get("prompt_cn"):
+            console.print(Panel(
+                result["prompt_cn"],
+                title="[bold]中文释义[/]",
+                border_style="blue",
+            ))
 
         console.print()

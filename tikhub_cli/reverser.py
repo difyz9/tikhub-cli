@@ -4,19 +4,21 @@
     from tikhub_cli.reverser import reverse
 
     result = reverse("image.png")
-    print(result["prompt"])
-    print(result["prompt_en"])
+    print(result["prompt"])          # 正向提示词 (English)
+    print(result["prompt_cn"])       # 中文释义
+    print(result["negative_prompt"]) # 反向提示词
 
 支持的后端:
+    - NVIDIA NIM — nvapi- 前缀自动识别
     - OmniRoute (OpenAI 兼容) — 默认
-    - NVIDIA NIM — nvidia_api_key 环境变量
     - 任意 OpenAI 兼容 API — base_url + api_key
 
 环境变量:
-    REVERSE_API_KEY    — API Key（默认从 memory 读取 OmniRoute key）
-    REVERSE_BASE_URL   — API 地址（默认 OmniRoute）
-    REVERSE_MODEL      — 模型名（默认 gpt-4o-mini）
+    REVERSE_API_KEY    — API Key（nvapi- 前缀自动走 NVIDIA）
+    REVERSE_BASE_URL   — API 地址
+    REVERSE_MODEL      — 模型名
     NVIDIA_API_KEY     — NVIDIA NIM 备选
+    OPENAI_API_KEY     — OpenAI 备选
 """
 
 from __future__ import annotations
@@ -28,8 +30,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 # ═══════════════════════════════════
 # 默认配置
 # ═══════════════════════════════════
@@ -37,35 +37,37 @@ import httpx
 DEFAULT_BASE = "http://43.160.253.168:20128/v1"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "meta/llama-3.2-11b-vision-instruct"
+# NVIDIA_MODEL = "meta/llama-3.2-11b-vision-instruct"
+NVIDIA_MODEL = "google/diffusiongemma-26b-a4b-it"
+
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_TOKENS = 2048
 
-# System Prompt — 告诉 LLM 如何分析图片
-SYSTEM_PROMPT = """你是一个专业的提示词逆向工程师。你的任务是基于用户提供的图片，生成一段高质量的、可用于 AI 图像生成模型（如 Stable Diffusion、Midjourney、DALL-E）复刻该图片的提示词。
+# System Prompt — 专业提示词逆向工程师
+SYSTEM_PROMPT = """你是一位专业的AI绘画提示词逆向工程师。根据用户上传的图片，逆向生成高质量AI绘图提示词。
 
-请严格按照以下 JSON 格式返回，不要包含其他内容：
+【输出格式】（严格按此格式，不得遗漏）
+---
+**画面类型判断：** （写实摄影 / 日系二次元 / 赛博朋克 / 奇幻插画 / 其他）
+**正向提示词（Positive Prompt）：**
+（英文正向提示词，包含：画质词 > 主体描述 > 环境背景 > 构图镜头 > 风格词 > 色彩光影）
+**反向提示词（Negative Prompt）：**
+（至少15个逗号分隔的英文劣质元素关键词）
+**参数建议：**
+- 宽高比：建议值
+- 模型建议：建议的AI模型
+**中文释义：**
+（正向提示词的中文翻译）
+---
 
-{
-  "prompt": "详细的中文提示词，包含主体、环境、光线、构图、画质、风格等完整描述，可直接用于 AI 绘图",
-  "prompt_en": "对应的英文提示词版本，适合 Stable Diffusion / Midjourney 使用",
-  "style_tags": ["标签1", "标签2", "标签3"],
-  "scene": "场景类型",
-  "subject": "主体描述",
-  "aspect_ratio": "画面比例推测",
-  "colors": ["主要颜色1", "主要颜色2"],
-  "mood": "情绪/氛围",
-  "camera": "镜头/视角描述"
-}
+【约束】
+- 客观分析视觉细节，不主观评价，不臆测图片外剧情
+- 正向提示词包含具体服饰材质、光线方向、色彩倾向
+- 如有人物需描述性别、年龄感、发型发色、服饰风格
+- 二次元/插画风格使用对应画风关键词（anime style, illustration, flat color）"""
 
-分析要点：
-1. 主体（人物/动物/物体）的详细特征
-2. 场景/背景环境
-3. 光线效果（自然光、人造光、黄金时刻等）
-4. 构图和镜头视角
-5. 色彩色调
-6. 画质/风格（摄影、插画、3D 等）
-7. 情绪氛围"""
+# keep it under 2000 chars for llama-vision context
+assert len(SYSTEM_PROMPT) < 2000, f"System prompt too long: {len(SYSTEM_PROMPT)}"
 
 
 # ═══════════════════════════════════
@@ -84,15 +86,14 @@ def reverse(
 
     Args:
         image: 图片路径 或 bytes
-        model: 模型名（默认从环境变量或 DEFAULT_MODEL）
+        model: 模型名
         base_url: API 地址
         api_key: API Key
         max_tokens: 最大 token
         temperature: 温度
 
     Returns:
-        {prompt, prompt_en, style_tags, scene, subject,
-         aspect_ratio, colors, mood, camera}
+        {style_type, prompt, negative_prompt, params, prompt_cn}
     """
     # 解析图片
     if isinstance(image, (str, Path)):
@@ -106,7 +107,6 @@ def reverse(
     elif isinstance(image, bytes):
         data = base64.b64encode(image).decode()
         mime = "image/png"
-        ext = "png"
     else:
         raise TypeError(f"不支持的类型: {type(image)}")
 
@@ -125,21 +125,22 @@ def reverse(
 
     url = base_url.rstrip("/")
 
-    # 调用 LLM
-    raw = _call_vision_api(url, key, model, image_url, max_tokens, temperature)
+    # 调用 LLM（最多重试 2 次，应对 NVIDIA 偶发超时）
+    import time as _time
+    last_err = None
+    for attempt in range(3):
+        try:
+            raw = _call_vision_api(url, key, model, image_url, max_tokens, temperature)
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                _time.sleep(2 * (attempt + 1))
+    else:
+        raise RuntimeError(f"3 次尝试均失败: {last_err}")
 
-    # 解析
-    result = _parse_response(raw)
-
-    # 中英互译兜底
-    zh = (result.get("prompt") or "").strip()
-    en = (result.get("prompt_en") or "").strip()
-    if not zh and en:
-        result["prompt"] = _translate(url, key, en, "zh", model)
-    elif not en and zh:
-        result["prompt_en"] = _translate(url, key, zh, "en", model)
-
-    return result
+    # 解析结构化输出
+    return _parse_response(raw)
 
 
 def _call_vision_api(
@@ -147,6 +148,8 @@ def _call_vision_api(
     image_url: str, max_tokens: int, temperature: float,
 ) -> str:
     """调用 OpenAI 兼容的 Vision API."""
+    import requests
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -159,7 +162,7 @@ def _call_vision_api(
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "请仔细观察这张图片，按照 System Prompt 的 JSON 格式返回分析结果。"},
+                    {"type": "text", "text": "请严格按照 System Prompt 的格式分析这张图片，不要遗漏任何输出部分。"},
                 ],
             },
         ],
@@ -167,10 +170,12 @@ def _call_vision_api(
         "temperature": temperature,
     }
 
-    with httpx.Client(timeout=120) as client:
-        resp = client.post(f"{base_url}/chat/completions", headers=headers, json=body)
-        resp.raise_for_status()
-        data = resp.json()
+    resp = requests.post(
+        f"{base_url}/chat/completions",
+        headers=headers, json=body, timeout=(15, 120),
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
     try:
         return data["choices"][0]["message"]["content"]
@@ -179,61 +184,100 @@ def _call_vision_api(
 
 
 def _parse_response(text: str) -> dict[str, Any]:
-    """从 LLM 回复中解析 JSON."""
-    text = text.strip()
-    # 移除 ```json ... ``` 包裹
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    text = text.strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # 兜底：提取第一个 { } 块
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-
-    # 全失败
-    return {
-        "prompt": text, "prompt_en": "", "style_tags": [],
-        "scene": "", "subject": "", "aspect_ratio": "",
-        "colors": [], "mood": "", "camera": "",
+    """解析 LLM 的结构化 markdown 输出."""
+    result: dict[str, Any] = {
+        "style_type": "",
+        "prompt": "",
+        "negative_prompt": "",
+        "params": {},
+        "prompt_cn": "",
     }
 
+    text = text.strip()
+    if not text:
+        return result
 
-def _translate(base_url: str, api_key: str, text: str, target: str, model: str) -> str:
-    """调用 LLM 翻译提示词（使用纯文本模型更快更便宜）."""
-    sys_prompt = {
-        "zh": "将以下英文提示词翻译成中文。保持专业术语和风格关键词不变，只翻译描述性文字。直接返回翻译结果。",
-        "en": "Translate the following Chinese prompt to English. Keep professional terms and style keywords. Return only the translation.",
-    }
+    # 去掉可能的 --- 包裹
+    text = re.sub(r"^---+", "", text)
+    text = re.sub(r"---+$", "", text)
+    # 去掉 ### 转 **
+    text = re.sub(r"^###\s*", "**", text, flags=re.MULTILINE)
+    text = re.sub(r"^##\s*", "**", text, flags=re.MULTILINE)
+    text = text.strip()
 
-    try:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-        body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": sys_prompt[target]},
-                {"role": "user", "content": text},
-            ],
-            "max_tokens": 2048,
-            "temperature": 0.3,
-        }
-        with httpx.Client(timeout=60) as client:
-            resp = client.post(f"{base_url}/chat/completions", headers=headers, json=body)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return text
+    # 提取各字段 — 同时匹配 ** 和 ### 格式
+    result["style_type"] = _extract_section(text, r"\*{2,3}\s*画面类型判断[：:]\s*\*{0,3}", default="未识别")
+
+    prompt = _extract_section(text, r"\*{2,3}\s*正向提示词[（(]Positive\s*Prompt[）)]?\s*\*{0,3}")
+    if not prompt:
+        prompt = _extract_section(text, r"\*{2,3}\s*正向提示词\s*\*{0,3}")
+    result["prompt"] = prompt
+
+    neg = _extract_section(text, r"\*{2,3}\s*反向提示词[（(]Negative\s*Prompt[）)]?\s*\*{0,3}")
+    if not neg:
+        neg = _extract_section(text, r"\*{2,3}\s*反向提示词\s*\*{0,3}")
+    result["negative_prompt"] = neg
+
+    params_text = _extract_section(text, r"\*{2,3}\s*参数建议[（(]如[有)）]?\s*\*{0,3}")
+    if params_text:
+        result["params"] = _parse_params(params_text)
+
+    cn = _extract_section(text, r"\*{2,3}\s*中文释义[（(]供用户理解[）)]?\s*\*{0,3}")
+    if not cn:
+        cn = _extract_section(text, r"\*{2,3}\s*中文释义\s*\*{0,3}")
+    result["prompt_cn"] = cn
+
+    # 如果全部解析失败，降级：把原始文本当 prompt
+    if not result["prompt"] and not result["prompt_cn"]:
+        result["prompt"] = text
+        result["prompt_cn"] = text
+
+    return result
+
+
+def _extract_section(text: str, pattern: str, default: str = "") -> str:
+    """提取 **标题** 下的内容，到下一个 ** 标题或末尾."""
+    idx = re.search(pattern, text)
+    if not idx:
+        return default
+
+    remaining = text[idx.end():]
+    # 找下一个 ** 标题（从行首开始）
+    next_marker = re.search(r"\n\*\*[^\n]+\*\*", remaining)
+    content = remaining[:next_marker.start()] if next_marker else remaining
+
+    # 清理：去掉首尾换行、编号列表的序号、多余空格
+    lines = content.strip().split("\n")
+    cleaned = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            cleaned.append("")
+            continue
+        # 去掉 "1. " "2. " 之类的编号前缀
+        line = re.sub(r"^\d+\.\s*", "", line)
+        # 去掉行首的 -
+        line = re.sub(r"^-\s*", "", line)
+        cleaned.append(line)
+
+    result = "\n".join(cleaned).strip()
+    # 整理连续空行
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
+
+
+def _parse_params(text: str) -> dict[str, str]:
+    """解析参数建议为键值对."""
+    params: dict[str, str] = {}
+    for line in text.strip().split("\n"):
+        line = line.strip().lstrip("- ")
+        if not line:
+            continue
+        # 匹配 "宽高比：16:9" 或 "宽高比: 16:9"
+        m = re.match(r"(.+?)[：:]\s*(.+)", line)
+        if m:
+            params[m.group(1).strip()] = m.group(2).strip()
+    return params
 
 
 def _mime_type(ext: str) -> str:
