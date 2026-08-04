@@ -708,3 +708,104 @@ def monitor(
     if dl["failed"]:
         dl_table.add_row("[red]✗ 失败[/]", str(dl["failed"]))
     console.print(dl_table)
+
+
+# ═══════════════════════════════════════════════════
+# 子命令: reverse — 图片逆向提示词
+# ═══════════════════════════════════════════════════
+
+@main.command()
+@click.argument("image", nargs=-1, required=True)
+@click.option("--model", "-m", default=None, help="模型名（默认 gpt-4o-mini）")
+@click.option("--api-key", default=None, help="API Key（或设 REVERSE_API_KEY 环境变量）")
+@click.option("--base-url", default=None, help="API 地址（默认 OmniRoute）")
+@click.option("--json", "as_json", is_flag=True, help="JSON 输出")
+def reverse(
+    image: tuple[str, ...], model: str | None,
+    api_key: str | None, base_url: str | None, as_json: bool,
+) -> None:
+    """从图片逆向生成 AI 绘图提示词.
+
+    \b
+    示例:
+      tikhub reverse photo.jpg
+      tikhub reverse a.png b.jpg -m gpt-4o
+      tikhub reverse img.png --json
+    """
+    from tikhub_cli.reverser import reverse as do_reverse
+
+    for i, img in enumerate(image):
+        path = Path(img).expanduser()
+        if not path.exists():
+            console.print(f"[red]图片不存在: {img}[/]")
+            continue
+
+        console.print(f"[dim]({i + 1}/{len(image)}) 分析 {path.name}...[/]")
+
+        try:
+            result = do_reverse(
+                path, model=model, api_key=api_key, base_url=base_url,
+            )
+        except FileNotFoundError as e:
+            console.print(f"[red]{e}[/]")
+            continue
+        except Exception as e:
+            console.print(f"[red]分析失败: {e}[/]")
+            continue
+
+        if as_json:
+            console.print_json(data=result)
+            continue
+
+        # Rich 格式化输出
+        from rich.panel import Panel
+        from rich.markdown import Markdown
+
+        console.print()
+        console.print(Panel.fit(
+            f"[bold cyan]📷 {path.name}[/]",
+            border_style="cyan",
+        ))
+
+        # 中文 prompt
+        if result.get("prompt"):
+            console.print(Panel(
+                result["prompt"],
+                title="[bold]中文提示词[/]",
+                border_style="green",
+            ))
+
+        # 英文 prompt
+        if result.get("prompt_en"):
+            console.print(Panel(
+                result["prompt_en"],
+                title="[bold]English Prompt[/]",
+                border_style="blue",
+            ))
+
+        # 结构化字段
+        fields = []
+        if result.get("subject"):
+            fields.append(("主体", result["subject"]))
+        if result.get("scene"):
+            fields.append(("场景", result["scene"]))
+        if result.get("mood"):
+            fields.append(("氛围", result["mood"]))
+        if result.get("camera"):
+            fields.append(("镜头", result["camera"]))
+        if result.get("aspect_ratio"):
+            fields.append(("比例", result["aspect_ratio"]))
+        if result.get("colors"):
+            fields.append(("色彩", ", ".join(result["colors"])))
+        if result.get("style_tags"):
+            fields.append(("风格标签", ", ".join(result["style_tags"])))
+
+        if fields:
+            table = Table(show_header=False, box=None)
+            table.add_column(style="dim", width=10)
+            table.add_column()
+            for k, v in fields:
+                table.add_row(k, v)
+            console.print(table)
+
+        console.print()
