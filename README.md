@@ -7,7 +7,7 @@
 | 依赖 | 用途 | 安装方式 |
 |------|------|----------|
 | Python 3.10+ | 运行环境 | — |
-| Microsoft Edge 或 Chromium | `tikhub login` / `fetch` | Edge 已预装在 Windows/macOS；或 `python3 -m playwright install chromium` |
+| Chrome 或 Chromium | `tikhub login` / `fetch` | Chrome 已安装则直接使用；否则 `python3 -m playwright install chromium` |
 | FFmpeg | `tikhub extract`（帧截图） | `brew install ffmpeg` / `apt install ffmpeg` |
 
 ## 安装
@@ -41,7 +41,7 @@ export TIKHUB_API_KEY="your_key_here"
 采集自己账号的点赞和收藏视频到本地。
 
 ```bash
-# 扫码登录（会打开 Edge 浏览器窗口）
+# 扫码登录（会打开 Chrome 浏览器窗口）
 tikhub login
 
 # 查看登录状态
@@ -64,7 +64,7 @@ tikhub fetch all --headless
 ```
 
 **工作流程**：
-1. `tikhub login` — 打开 Edge 窗口，手动扫码登录。Cookie 保存到 `~/.tikhub/auth.json`
+1. `tikhub login` — 打开 Chrome 窗口，手动扫码登录。
 2. `tikhub fetch` — 打开浏览器，滚动收藏/喜欢页面，拦截抖音 API 响应，提取视频地址，逐个下载到 `~/.tikhub/downloads/`
 
 下载的视频命名格式：`作者_文案摘要.mp4`
@@ -198,9 +198,9 @@ tikhub-cli/
 
 | 命令 | 功能 | 需要 |
 |------|------|------|
-| `login` | 扫码登录抖音 | `[douyin]` + Edge/Chromium |
+| `login` | 扫码登录抖音 | `[douyin]` + Chrome/Chromium |
 | `status` | 查看登录状态 | `[douyin]` |
-| `fetch` | 采集点赞/收藏并下载 | `[douyin]` + Edge/Chromium |
+| `fetch` | 采集点赞/收藏并下载 | `[douyin]` + Chrome/Chromium |
 | `search` | 多平台搜索 | `TIKHUB_API_KEY` |
 | `info` | 分享链接解析 | `TIKHUB_API_KEY` |
 | `link` | yt-dlp 通用链接下载 | `[link]` |
@@ -227,7 +227,7 @@ tikhub-cli/
 ~/.tikhub/
 ├── auth.json              # 抖音登录态（Cookie + sec_user_id）
 ├── cache.db               # TikHub API SQLite 缓存
-├── browser_profile/       # Edge 持久化用户目录（隔离，不影响日常浏览器）
+├── browser_profile/       # Chrome 持久化用户目录（隔离，不影响日常浏览器）
 └── downloads/             # 下载的视频文件
     ├── 作者_文案摘要1.mp4
     ├── 作者_文案摘要2.mp4

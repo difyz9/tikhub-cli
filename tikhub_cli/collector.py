@@ -4,37 +4,29 @@
     from tikhub_cli.collector import login, fetch
 
     login()                                    # 扫码登录
-    result = fetch("favorites", pages=5)       # 采集收藏
-    result = fetch("likes", pages=5)           # 采集点赞
-    result = fetch("all", pages=3, download=True)  # 全部采集+下载
+    login(account="work")                      # 另一个账号登录
+    fetch("favorites", pages=5)                # 采集收藏
+    fetch("likes", account="work")             # 指定账号
 
 存储:
-    ~/.tikhub/auth.json     — 浏览器登录态
-    ~/.tikhub/cache.db      — 视频数据缓存
-    ~/.tikhub/downloads/    — 下载的视频
+    ~/.tikhub/accounts/<account>/
+    ├── auth.json          — 浏览器登录态
+    ├── browser_profile/   — Edge 持久化用户目录
+    └── downloads/         — 下载的视频
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
-import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-# ═══════════════════════════════════════
-# 路径
-# ═══════════════════════════════════════
-
-DATA_DIR = Path.home() / ".tikhub"
-AUTH_PATH = DATA_DIR / "auth.json"
-DOWNLOADS_DIR = DATA_DIR / "downloads"
-BROWSER_PROFILE = DATA_DIR / "browser_profile"
+from tikhub_cli import accounts
 
 # 抖音 API 端点
 HOME_URL = "https://www.douyin.com/"
@@ -50,21 +42,23 @@ RESPONSE_SOURCES = {
 # Auth 管理
 # ═══════════════════════════════════════
 
-def load_auth() -> dict:
-    if AUTH_PATH.exists():
+def load_auth(account: str | None = None) -> dict:
+    path = accounts.auth_path(account)
+    if path.exists():
         try:
-            return json.loads(AUTH_PATH.read_text())
+            return json.loads(path.read_text())
         except (OSError, ValueError):
             pass
     return {}
 
 
-def save_auth(state: dict, sec_uid: str = "") -> Path:
-    AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+def save_auth(state: dict, sec_uid: str = "", account: str | None = None) -> Path:
+    path = accounts.auth_path(account)
+    path.parent.mkdir(parents=True, exist_ok=True)
     state["sec_user_id"] = sec_uid or _extract_cookie(state, "sec_user_id")
     state["saved_at"] = datetime.now().isoformat(timespec="seconds")
-    AUTH_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2))
-    return AUTH_PATH
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    return path
 
 
 def _extract_cookie(auth: dict, name: str) -> str:
@@ -74,15 +68,15 @@ def _extract_cookie(auth: dict, name: str) -> str:
     return ""
 
 
-def has_session(auth: dict | None = None) -> bool:
-    a = auth or load_auth()
+def has_session(auth: dict | None = None, account: str | None = None) -> bool:
+    a = auth or load_auth(account)
     return bool(_extract_cookie(a, "sessionid") or _extract_cookie(a, "sessionid_ss"))
 
 
-def _cookie_dict() -> dict[str, str]:
+def _cookie_dict(account: str | None = None) -> dict[str, str]:
     return {
         c["name"]: c["value"]
-        for c in (load_auth().get("cookies") or [])
+        for c in (load_auth(account).get("cookies") or [])
         if c.get("name") and c.get("value")
     }
 
@@ -91,17 +85,16 @@ def _cookie_dict() -> dict[str, str]:
 # 浏览器
 # ═══════════════════════════════════════
 
-def _launch_browser(playwright: Any, headless: bool = False) -> Any:
-    BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
-    channel = os.environ.get("DOUKU_BROWSER_CHANNEL", "msedge")
+def _launch_browser(playwright: Any, headless: bool = False, account: str | None = None) -> Any:
+    profile = accounts.browser_profile_dir(account)
     opts = {
-        "user_data_dir": str(BROWSER_PROFILE),
+        "user_data_dir": str(profile),
         "headless": headless,
         "locale": "zh-CN",
         "accept_downloads": False,
     }
     try:
-        return playwright.chromium.launch_persistent_context(channel=channel, **opts)
+        return playwright.chromium.launch_persistent_context(channel="chrome", **opts)
     except Exception:
         return playwright.chromium.launch_persistent_context(**opts)
 
@@ -117,15 +110,16 @@ def _ensure_playwright() -> None:
 # 登录
 # ═══════════════════════════════════════
 
-def login(timeout: int = 180) -> dict:
+def login(timeout: int = 180, account: str | None = None) -> dict:
     """打开浏览器让用户扫码登录，保存登录态."""
+    key = account or accounts.get_account()
     _ensure_playwright()
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
-        ctx = _launch_browser(pw)
+        ctx = _launch_browser(pw, account=key)
         # 尝试导入旧 state
-        existing = load_auth()
+        existing = load_auth(key)
         if has_session(existing):
             cookies = existing.get("cookies") or []
             if cookies:
@@ -134,6 +128,7 @@ def login(timeout: int = 180) -> dict:
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto(HOME_URL, wait_until="domcontentloaded", timeout=60_000)
         print("请在打开的浏览器窗口中扫码登录抖音。")
+        print(f"账号: {key}")
         print("检测到登录成功后会自动保存...")
 
         deadline = time.time() + timeout
@@ -141,13 +136,14 @@ def login(timeout: int = 180) -> dict:
             state = ctx.storage_state()
             if has_session(state):
                 sec_uid = _extract_cookie(state, "sec_user_id")
-                save_auth(state, sec_uid)
+                save_auth(state, sec_uid, account=key)
                 ctx.close()
                 return {
                     "success": True,
-                    "auth_path": str(AUTH_PATH),
-                    "profile_dir": str(BROWSER_PROFILE),
+                    "auth_path": str(accounts.auth_path(key)),
+                    "profile_dir": str(accounts.browser_profile_dir(key)),
                     "sec_user_id": sec_uid,
+                    "account": key,
                 }
             page.wait_for_timeout(1_000)
 
@@ -163,6 +159,7 @@ def fetch(
     source: str = "all",
     pages: int = 3,
     headless: bool = False,
+    account: str | None = None,
 ) -> dict:
     """采集个人点赞/收藏数据.
 
@@ -177,16 +174,17 @@ def fetch(
     _ensure_playwright()
     from playwright.sync_api import sync_playwright
 
+    key = account or accounts.get_account()
     targets = ["favorites", "likes"] if source == "all" else [source]
     results: dict[str, dict] = {t: {"pages": 0, "videos": 0} for t in targets}
     all_videos: list[dict] = []
     sec_uid = ""
 
     with sync_playwright() as pw:
-        ctx = _launch_browser(pw, headless=headless)
+        ctx = _launch_browser(pw, headless=headless, account=key)
 
         # 恢复登录态
-        auth = load_auth()
+        auth = load_auth(key)
         if has_session(auth):
             cookies = auth.get("cookies") or []
             if cookies:
@@ -256,7 +254,7 @@ def fetch(
         page.remove_listener("response", handle_response)
 
         # 保存更新后的登录态
-        save_auth(ctx.storage_state(), sec_uid)
+        save_auth(ctx.storage_state(), sec_uid, account=key)
         ctx.close()
 
     # 汇总
@@ -277,6 +275,7 @@ def download_collected(
     items: list[dict],
     out_dir: str | None = None,
     limit: int = 0,
+    account: str | None = None,
 ) -> dict:
     """下载采集到的视频.
 
@@ -290,10 +289,11 @@ def download_collected(
     """
     import requests
 
-    out = Path(out_dir or DOWNLOADS_DIR).expanduser().resolve()
+    key = account or accounts.get_account()
+    out = Path(out_dir or accounts.downloads_dir(key)).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    cookies = _cookie_dict()
+    cookies = _cookie_dict(key)
     session = requests.Session()
     session.cookies.update(cookies)
     session.headers.update({
@@ -388,15 +388,18 @@ def _safe_filename(s: str, max_len: int = 80) -> str:
     return s[:max_len].rstrip(" ._")
 
 
-def status() -> dict:
+def status(account: str | None = None) -> dict:
     """检查登录状态."""
-    auth = load_auth()
+    key = account or accounts.get_account()
+    auth = load_auth(key)
+    bp = accounts.browser_profile_dir(key)
     return {
         "logged_in": has_session(auth),
-        "auth_path": str(AUTH_PATH),
+        "account": key,
+        "auth_path": str(accounts.auth_path(key)),
         "sec_user_id": auth.get("sec_user_id", ""),
         "saved_at": auth.get("saved_at", ""),
         "cookie_count": len(auth.get("cookies", [])),
-        "profile_dir": str(BROWSER_PROFILE),
-        "profile_exists": BROWSER_PROFILE.exists(),
+        "profile_dir": str(bp),
+        "profile_exists": bp.exists(),
     }

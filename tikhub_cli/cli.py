@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -460,7 +461,8 @@ def report(title: str, file: str | None, output: str) -> None:
 
 @main.command()
 @click.option("--timeout", type=int, default=180, help="等待超时秒数")
-def login(timeout: int) -> None:
+@click.option("--account", "-a", default=None, help="账号别名（默认: default）")
+def login(timeout: int, account: str | None) -> None:
     """打开浏览器扫码登录抖音，保存登录态."""
     try:
         from tikhub_cli.collector import login as do_login
@@ -469,8 +471,9 @@ def login(timeout: int) -> None:
         raise SystemExit(1)
 
     try:
-        result = do_login(timeout=timeout)
+        result = do_login(timeout=timeout, account=account)
         console.print(f"[green]✓ 登录成功[/]")
+        console.print(f"  账号: {result.get('account', '-')}")
         console.print(f"  用户: {result.get('sec_user_id', '-')}")
         console.print(f"  状态文件: {result['auth_path']}")
     except RuntimeError as e:
@@ -490,9 +493,10 @@ def login(timeout: int) -> None:
 @click.option("--output", "-o", default=None, help="下载目录")
 @click.option("--headless", is_flag=True, help="无头模式（可能触发验证）")
 @click.option("--json", "as_json", is_flag=True, help="JSON 输出采集结果")
+@click.option("--account", "-a", default=None, help="账号别名（默认: default）")
 def fetch(
     source: str, pages: int, download: bool, limit: int,
-    output: str | None, headless: bool, as_json: bool,
+    output: str | None, headless: bool, as_json: bool, account: str | None,
 ) -> None:
     """采集自己的抖音点赞/收藏，可选自动下载视频."""
     try:
@@ -503,7 +507,7 @@ def fetch(
 
     console.print(f"[dim]采集 {source}（最多 {pages} 页）...[/]")
     try:
-        result = do_fetch(source=source, pages=pages, headless=headless)
+        result = do_fetch(source=source, pages=pages, headless=headless, account=account)
     except RuntimeError as e:
         console.print(f"[red]✗ {e}[/]")
         raise SystemExit(1)
@@ -539,7 +543,7 @@ def fetch(
         return
 
     console.print(f"[dim]开始下载 {min(len(all_items), limit) if limit else len(all_items)} 个视频...[/]")
-    dl_result = download_collected(all_items, out_dir=output, limit=limit)
+    dl_result = download_collected(all_items, out_dir=output, limit=limit, account=account)
 
     table = Table(title="下载结果")
     table.add_column("状态", justify="center")
@@ -556,7 +560,8 @@ def fetch(
 # ═══════════════════════════════════════════════════
 
 @main.command()
-def status() -> None:
+@click.option("--account", "-a", default=None, help="账号别名（默认: default）")
+def status(account: str | None) -> None:
     """查看抖音登录状态."""
     try:
         from tikhub_cli.collector import status as do_status
@@ -564,7 +569,7 @@ def status() -> None:
         console.print("[dim]未安装 douyin 模块。pip install 'tikhub-cli[douyin]'[/]")
         return
 
-    s = do_status()
+    s = do_status(account=account)
     if s["logged_in"]:
         console.print(f"[green]✓ 已登录[/]")
     else:
@@ -573,9 +578,133 @@ def status() -> None:
     table = Table(show_header=False)
     table.add_column(style="dim")
     table.add_column()
+    table.add_row("账号", s.get("account", "-"))
     table.add_row("用户 ID", s.get("sec_user_id", "-"))
     table.add_row("保存时间", s.get("saved_at", "-"))
     table.add_row("Cookie 数", str(s.get("cookie_count", 0)))
     table.add_row("状态文件", s.get("auth_path", "-"))
     table.add_row("浏览器目录", s.get("profile_dir", "-"))
     console.print(table)
+
+
+# ═══════════════════════════════════════════════════
+# 子命令: monitor — 实时监控
+# ═══════════════════════════════════════════════════
+
+@main.group(invoke_without_command=True)
+@click.option("--watch", "do_watch", is_flag=True, help="持续监控（前台）")
+@click.option("--daemon", "do_daemon", is_flag=True, help="后台守护进程")
+@click.option("--stop", "do_stop", is_flag=True, help="停止守护进程")
+@click.option("--status", "do_status", is_flag=True, help="查看监控状态")
+@click.option("--interval", "-i", type=int, default=15, help="检查间隔（分钟，默认 15）")
+@click.option("--account", "-a", default=None, help="账号别名（默认: default）")
+@click.pass_context
+def monitor(
+    ctx: click.Context, do_watch: bool, do_daemon: bool,
+    do_stop: bool, do_status: bool, interval: int, account: str | None,
+) -> None:
+    """实时监控抖音新点赞/收藏，自动下载."""
+    try:
+        from tikhub_cli.monitor import (
+            check_once, download_new, daemon_start, daemon_stop, daemon_status, Monitor,
+        )
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        raise SystemExit(1)
+
+    if do_stop:
+        result = daemon_stop(account=account)
+        if result["success"]:
+            console.print(f"[green]✓ 守护进程已停止[/] (PID: {result['pid']}, 账号: {result.get('account', '-')})")
+        else:
+            console.print(f"[yellow]{result['error']}[/]")
+        return
+
+    if do_status:
+        s = daemon_status(account=account)
+        if s["running"]:
+            console.print(f"[green]● 守护进程运行中[/] (PID: {s['pid']}, 账号: {s.get('account', '-')})")
+        else:
+            console.print("[dim]○ 守护进程未运行[/]")
+
+        table = Table(show_header=False)
+        table.add_column(style="dim")
+        table.add_column()
+        if s.get("last_check"):
+            when = datetime.fromtimestamp(s["last_check"]).strftime("%Y-%m-%d %H:%M:%S")
+            table.add_row("上次检查", when)
+        table.add_row("累计发现", str(s.get("total_seen", 0)))
+        table.add_row("已下载", str(s.get("downloaded", 0)))
+        table.add_row("失败", str(s.get("failed", 0)))
+        table.add_row("数据库", s.get("db_path", "-"))
+        table.add_row("日志文件", s.get("log_path", "-"))
+        console.print(table)
+
+        if s.get("last_new", 0) == 0 and s.get("last_downloaded", 0) == 0:
+            return
+
+        if s.get("log_tail"):
+            console.print("\n[dim]最近日志:[/]")
+            console.print(f"[dim]{s['log_tail']}[/]")
+        return
+
+    if do_daemon:
+        result = daemon_start(interval_minutes=interval, account=account)
+        if result["success"]:
+            console.print(f"[green]✓ 守护进程已启动[/] (PID: {result['pid']}, 账号: {result.get('account', '-')})")
+            console.print(f"  间隔: {interval} 分钟")
+            console.print(f"  日志: {result['log']}")
+            console.print(f"  停止: tikhub monitor --stop -a {result['account']}")
+        else:
+            console.print(f"[red]✗ {result['error']}[/]")
+        return
+
+    if do_watch:
+        console.print(f"[green]▶ 开始持续监控[/] (账号: {account or 'default'}, 间隔: {interval} 分钟, Ctrl+C 停止)")
+        console.print(f"[dim]日志文件: ~/.tikhub/monitor_{account or 'default'}.log[/]")
+        try:
+            m = Monitor(interval_minutes=interval, account=account)
+            m.run_forever()
+        except KeyboardInterrupt:
+            console.print("\n[dim]监控已停止[/]")
+        return
+
+    # 默认：单次检查
+    console.print("[dim]检查中...[/]")
+    try:
+        result = check_once(account=account)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        raise SystemExit(1)
+
+    if not result.get("success"):
+        console.print(f"[red]✗ {result.get('error', '未知错误')}[/]")
+        raise SystemExit(1)
+
+    total_new = result.get("total_new", 0)
+    sources = result.get("sources", {})
+
+    table = Table(title="检查结果")
+    table.add_column("来源")
+    table.add_column("总计", justify="right")
+    table.add_column("新增", justify="right")
+    for name, info in sources.items():
+        new_str = f"[green]{info['new']}[/]" if info['new'] else "[dim]0[/]"
+        table.add_row(name, str(info["total"]), new_str)
+    console.print(table)
+
+    if total_new == 0:
+        console.print("[dim]无新视频[/]")
+        return
+
+    items = result.get("items", [])
+    console.print(f"[dim]开始下载 {len(items)} 个新视频...[/]")
+
+    dl = download_new(items, account=account)
+    dl_table = Table(title="下载结果")
+    dl_table.add_column("状态", justify="center")
+    dl_table.add_column("数量", justify="right")
+    dl_table.add_row("[green]✓ 成功[/]", str(dl["success"]))
+    if dl["failed"]:
+        dl_table.add_row("[red]✗ 失败[/]", str(dl["failed"]))
+    console.print(dl_table)
